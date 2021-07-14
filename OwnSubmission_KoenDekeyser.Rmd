@@ -1,0 +1,340 @@
+---
+title: "Undernourishment prediction for Sub-Saharan Africa and Asia"
+author: "Koen Dekeyser"
+date: "14/07/2021"
+output: 
+  pdf_document: 
+    toc: true
+    toc_depth: 3
+    number_sections: true
+  html_document: default
+---
+\tableofcontents
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', cache=FALSE, cache.lazy = FALSE)
+```
+
+```{r require-libraries, eval=T, echo=F, message=F, warning=F}
+#These will install the required libraries if necessary
+if(!require(tidyverse)) install.packages("tidyverse")
+if(!require(caret)) install.packages("caret")
+if(!require(data.table)) install.packages("data.table")
+if(!require(kableExtra)) install.packages("kableExtra")
+if(!require(ggplot2)) install.packages("ggplot2")
+if(!require(forcats)) install.packages("forcats")
+if(!require(corrplot)) install.packages("corrplot")
+if(!require(randomForest)) install.packages("randomForest")
+if(!require(GGally)) install.packages("GGally")
+```
+
+```{r libraries, eval=T, echo=F, message=F, warning=F}
+#Loading needed libraries
+library(tidyverse)
+library(caret)
+library(data.table)
+library(kableExtra)
+library(ggplot2)
+library(forcats)
+library(corrplot)
+library(randomForest)
+library(GGally)
+```
+\newpage
+# Executive summary
+The world is not on track to achieve Sustainable Development Goal 2 (SDG2) to end hunger and improve sustainable agriculture by 2030. Global food insecurity has been rising since 2014 and COVID-19 could push a further 100 million people into the ranks of the food insecure. Redoubled efforts are needed to ensure our food systems are able to feed the world. The prevalence of undernourishment is an indicator that measures the proportion of the population that lacks enough dietary energy for a healthy, active life^[FAO, IFAD, UNICEF, WFP, & WHO. (2019). The State of Food Security and Nutrition in the World 2019. Safeguarding against economic slowdowns and downturns. Rome: FAO.]. In 2015, the United Nations set the goal of zero hunger by 2030. Sadly, the opposite is likely to happen, with more undernourished people in 2030 compared to 2015. Most undernourished people reside in Asia, while the prevalence is highest in Sub-Saharan Africa. The goal of this report is to build a model that predicts the prevalence of undernourishment for Sub-Saharan Africa and Asia based on a selection of key economic, societal, and agricultural indicators.
+
+All data comes from the World Bank Open Data repository. After pulling the data and initial wrangling, the dataset is split into a 90% training set ("edx") and a 10% evaluation set ("evaluation). For training and regularisation, this training set is further divided in a 90% training set ("edx_train") and a 10% evaluation set ("edx_test"). The purpose of this additional division is to only test with the "evaluation" set after the final model has been trained. 
+
+Besides this executive summary, this report has a ***Methods*** section which details how the data is pulled and wrangled, explores the data, and details the modelling approach. This is followed by a ***Results*** section, which pre-processes, builds, trains and regulates the models proposed in the Methods section. The Root Mean Square Error (RMSE) of the best performing model is calculated and evaluated with the final "evaluation" set. The final model is a ***finetuned Random forest model***, which is able to predict the prevalence of undernourishment with a rounded ***RMSE of 2.88***. The ***Conclusion*** section gives a brief summary of the report, its limitations and future work.
+
+***Important - to improve readability of this document, all code deemed non-essential, such as ggplot and kable code, has not been shown in this report (eval=T, echo=F) but can of course be found in the .rmd file. This approach has been confirmed with the teacher's assistant, and will provide a much clearer reading experience for you while focusing on the essentials.***
+
+
+# Methods
+## Data pulling and wrangling
+Seventeen key economic, societal, and agricultural indicators from the World Bank Open Data repository were chosen based on their potential to predict undernourishment. These indicators are shows in Table 1. The data come from the World Bank Data repository and is pulled in through the WDI R package. As the World Banks' servers are frequently not available, the data was saved in a csv file and uploaded to GitHub. The summary of the dataset shows that several indicators have large data gaps: for example, the indicators poverty, inequality and water use in agriculture has more than 2400 NA's (about 80%) and thus were dropped entirely from the dataset. Life expectancy was dropped because the causal linkage is quite clear: lower undernourishment would lead to longer lives, not the opposite. Lastly, only rows with undernourishment data present were kept. 
+```{r pull, message = T}
+#URL is cut up to improve the aesthetics of the report
+url1 <- "https://raw.githubusercontent.com/KoenDekeyser/EdX_DataScience/main/"
+url2 <- "WDI_database.csv"
+url <- paste0(url1,url2)
+
+#initial wrangling to pivot it from tidy to long data
+db_pull <- read.csv(url) %>%
+  select(area, value, date, name) %>%
+  pivot_wider(names_from = name, values_from = value,
+              names_sep = "_") %>%
+  filter(!is.na(Undernourishment))
+
+#Replace the column headers with no-space names
+names(db_pull) <-  str_replace_all(names(db_pull), c(" " = "_"))
+summary(db_pull)
+```
+
+There are still quite a few missing values for the other indicators. To estimate the values missing, an average is taken from each indicator grouped per area (equal to country) and this is used to replace the missing values. The logarithm of GDP per capita and cereal yield are taken as high performing countries can easily skew the data.  
+```{r wrangle, message = T}
+#indicators deselected because of too many missing data
+db <- db_pull %>%
+  select(!c(Poverty, Inequality, Water_use_agriculture,
+            Life_expectancy)) %>%
+#Remaining NA's are filled up by taking the area mean of that indicator
+  group_by(area) %>%
+    mutate(Agricultural_land = ifelse(is.na(Agricultural_land), 
+                               mean(Agricultural_land, na.rm = T), 
+                               Agricultural_land),
+         Forest_land  = ifelse(is.na(Forest_land), 
+                                mean(Forest_land, na.rm = T), 
+                               Forest_land),
+         Cereal_yield  = ifelse(is.na(Cereal_yield), 
+                               mean(Cereal_yield, na.rm = T), 
+                               Cereal_yield),
+         GDP_growth = ifelse(is.na(GDP_growth), 
+                                mean(GDP_growth, na.rm = T), 
+                                GDP_growth),
+         Food_imports = ifelse(is.na(Food_imports), 
+                                mean(Food_imports, na.rm = T),  
+                                Food_imports),
+         Population_growth = ifelse(is.na(Population_growth ), 
+                                 mean(Population_growth , na.rm = T),  
+                                 Population_growth),
+         GDP_per_capita = ifelse(is.na(GDP_per_capita ), 
+                                  mean(GDP_per_capita , na.rm = T),  
+                                  GDP_per_capita),
+         Agriculture_GDP = ifelse(is.na(Agriculture_GDP ), 
+                               mean(Agriculture_GDP , na.rm = T),  
+                               Agriculture_GDP),
+         Agricultural_jobs = ifelse(is.na(Agricultural_jobs ), 
+                               mean(Agricultural_jobs , na.rm = T),  
+                               Agricultural_jobs),
+         Food_production_index = ifelse(is.na(Food_production_index ), 
+                                    mean(Food_production_index , na.rm = T),  
+                                    Food_production_index),
+         Urban_population = ifelse(is.na(Urban_population ), 
+                                    mean(Urban_population , na.rm = T),  
+                                   Urban_population)) %>%
+  ungroup() %>%
+#two indicators are converted to their logarithm
+  mutate(GDP_per_capita_log = log(GDP_per_capita),
+         Cereal_yield_log = log(Cereal_yield)) %>%
+  select(!c(GDP_per_capita, Cereal_yield)) %>%
+  na.omit()
+rm(db_pull)
+
+```
+In the end, the dataset has `r length(db)` indicators and `r nrow(db)` rows. 
+
+
+After this wrangling, the dataset is ready for analysis. The dataset is split in a 90% training set ("edx") and a 10% evaluation set ("evaluation"), in order to have a holdout dataset available to test the predictive strength of the model.  
+```{r splitting, eval=T, message=F, warning=F}
+# Validation set will be 10% of dataset
+set.seed(1, sample.kind="Rounding") #if using R 3.5 or earlier, use `set.seed(1)
+test_index <- createDataPartition(y = db$Undernourishment, 
+                                  times = 1, p = 0.1, list = FALSE)
+edx <- db[-test_index,]
+validation <- db[test_index,]
+rm(test_index)
+```
+
+
+## Data exploration
+### Introduction
+There are `r I(nrow(edx) + nrow(validation))` rows of observations in the dataset. This has been split in a 90% training set with `r nrow(edx)` rows, and an validation set of `r nrow(validation)` rows. This section focuses on describing the training dataset. There are `r n_distinct(edx$area)` unique countries in the training set. Table 1 provides a description of all indicators.
+
+```{r table-description-variables, eval=T, echo=F}
+#creating table explaining indicators
+data.frame(
+  Indicator = colnames(edx),
+  Description = c(
+    "Country name",
+    "Year of the observation", 
+    "% growth of the population",
+    "% of the population living in urban areas",
+    "% growth of GDP",
+    "% of contribution of the agricultural sector to GDP",
+    "% of employment generated by the agricultural sector",
+    "Index covering the production of edible and nutritious food crops",
+    "% of food imports over merchandise imports",
+    "% of land used for agriculture",
+    "% of land occupied by forests",
+    "% of population that is undernourished",
+    "Logarithm of GDP per capita, in current USD",
+    "Logarithm of kilograms per hectare of cereal crops"
+    )) %>%
+    kbl("latex",
+        booktabs = T,
+        caption = "Description of the dataset variables") %>%
+      kable_classic(full_width = F) %>%
+      row_spec(0, bold=T) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+The structure of the dataset is shown in table 2, which depicts the first five rows of the training dataset and the first five columns. This shows how each row is organised according to an area and a year, together with the indicators.
+```{r first-five-lines, echo=F}
+#Building table with first five rows and five columns
+edx[1:5,1:5] %>%
+      kbl("latex",
+        booktabs = T,
+        caption = "First five rows and five columns of the dataset") %>%
+      kable_classic(full_width = F) %>%
+      row_spec(0, bold=T) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+Figure 1 presents the histograms of all indicators, showing that the number of observations per year is stable at around 60. Population growth and undernourishment have the most skewed distributions. 
+```{r facet-wrap, echo = F, warning = F, message = F}
+#Histograms of all indicators
+edx[,-1] %>% 
+  pivot_longer(everything(), names_to = "name", values_to = "value") %>% 
+  ggplot(aes(value)) + 
+  #facet_wrap creates all the different graphs
+  facet_wrap(~name, scales = "free") + 
+  geom_histogram() +
+  labs(title="Figure 1. Histograms of all numeric variables") +
+  theme_classic() +
+  theme(strip.background = element_blank())
+```
+Figure 2 shows that undernourishment by country declined between 1990-2013, but then progress stagnated. Between 2016-2019, undernourishment increased.
+```{r Linegrap-undernourishment, message = F, echo = F}
+#Linegraph showing undernourishment per year LOESS curve
+edx %>%
+  ggplot(aes(x=date, y=Undernourishment)) +
+  geom_smooth(method = "loess") +
+  labs(title = "Figure 2. LOESS curve for undernourishment over years") +
+  theme_classic()
+```
+
+Figure 3 shows the correlation matrix for all indicators. Undernourishment is positively correlated with agricultural jobs and agricultural GDP, while GDP per capita, GDP growth, and cereal yield are negatively correlated. 
+```{r correlation-plot, echo = F}
+#builds correlation plot for all indicators
+ggcorr(edx[,-1]) + labs(title="Figure 3. Correlations matrix of all indicators")
+```
+
+
+## Modelling approach
+The exploratory analysis shows that undernourishment is correlated with a few indicators related to general wealth and agricultural economic performance. This will make it useful when building statistical models such as a general linear regression. But, intuitively, given that undernourishment declined over the years, it is surprising that time is not strongly correlated with undernourishment. More advanced machine learning models such as Random forests might have superior performance in predicting undernourishment in Asia and sub-Saharan Africa by better picking up these patterns in the data. The KNN model was used in creating this report, but because it is better for classification instead of regression, it was ultimately discarded. The performance of model prediction is evaluated through the root-mean-square error (RMSE), which measures the difference between values predicted by a model or an estimator and the values observed^[https://en.wikipedia.org/wiki/Root-mean-square_deviation].
+
+The RMSE function is:
+```{r RMSE}
+#RMSE function
+  RMSE <- function(true_undernourishment, predicted_undernourishment){
+    sqrt(mean((true_undernourishment - predicted_undernourishment)^2))
+  }
+```
+
+
+# Results
+## Preparing additional data partitioning
+The edx set will be further partitioned into a 90% training set ("edx_train") and a 10% test set ("edx_test"), in order to lower (over-)training.
+```{r additional-partitioning, message=F, warning=F}
+#Additional evaluation dataset will be 10% of training dataset
+set.seed(1, sample.kind="Rounding")#if using R 3.5 or earlier, use `set.seed(1)
+test_index <- createDataPartition(y = edx$Undernourishment, 
+                                  times = 1, p = 0.1, list = FALSE)
+edx_train <- edx[-test_index,]
+edx_test <- edx[test_index,]
+
+rm(test_index)
+```
+
+First, a generalized linear regression model employed on all continuous data. 
+```{r glm}
+#A general GLm model with all numeric indicators as predictors
+glm_train <- train(Undernourishment ~ .,
+                 method = "glm",
+                 metric = "RMSE",
+                 data = edx_train[,-1])
+summary(glm_train)
+glm_hat <- predict(glm_train, edx_test)
+RMSE_glm <- RMSE(edx_test$Undernourishment, glm_hat)
+```
+The generalized linear model has six significant correlated variables and provides a RMSE of `r RMSE_glm`, which is way too high to make useful predictions on the undernourishment in sub-Saharan Africa and Asia. We then turn to training a Random forest model:
+
+```{r Randomforest, warning= F}
+#A randomforest model primed for RMSE evaluation
+set.seed(1, sample.kind="Rounding")#if using R 3.5 or earlier, use `set.seed(1)
+rf_train <- train(Undernourishment ~ ., 
+                method = "rf",
+                metric = "RMSE",
+                data = edx_train[,-1])
+rf_hat <- predict(rf_train, edx_test)
+RMSE_rf <- RMSE(edx_test$Undernourishment, rf_hat)
+```
+The Random forest model has a RMSE of `r RMSE_rf`, which is a large improvement (`r RMSE_rf - RMSE_glm` better) compared to the generalized linear model.
+
+```{r table-performance-models, eval = T, echo = F, message = F}
+data.frame(
+  Model = c("Generalised linear model",
+            "Random forest"),
+  RMSE = c(RMSE_glm,
+                  RMSE_rf)) %>%
+    kbl("latex",
+        booktabs = T,
+        caption = "Performance of the models") %>%
+      kable_classic(full_width = F) %>%
+      row_spec(0, bold=T) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+Table 3 shows that Random forest is the best performing model. Finetuning can enhance the predictive accuracy of a model by making small adjustments.
+
+## Finetuning
+As Random forest models take long to compute, cross-validation was kept to 5 folds, with no repeats. The tuneGrid is a sequence of 4 to 10 whole numbers as the previous iteration of Random forest showed that the optimal tuning parameter would be within these bounds. 
+```{r finetuning, echo = T, warning = F}
+#finetuning
+set.seed(1, sample.kind="Rounding") 
+#Five-fold cross validation with zero iterations
+control <- trainControl(method="cv", number = 5)
+#tuning parameters between 4 and 10
+grid <- data.frame(mtry = seq(4,10,1))
+
+train_rf<- train(Undernourishment ~ ., 
+                method = "rf",
+                metric = "RMSE",
+                trControl = control,
+                tuneGrid = grid,
+                data = edx_train[,-1])
+
+```
+The best performing tuneGrid parameter is `r train_rf$bestTune$mtry`. All the parameters are now present to evaluate the final model on the holdout evaluation data ("evaluation"), by a Random forest model with a finetune parameter of `r train_rf$bestTune$mtry`.
+
+## Final model and validation with the validation data
+```{r Final-model, echo = T, warning = F}
+#Final model
+set.seed(1, sample.kind="Rounding")#if using R 3.5 or earlier, use `set.seed(1)
+rf_fit <- randomForest(Undernourishment ~ .,
+                minNode  = train_rf$bestTune$mtry,
+                data = edx_train[,-1])
+rf_hat <- predict(rf_fit, validation)
+RMSE_final <- RMSE(validation$Undernourishment, rf_hat)
+
+#Show the importance 
+stack(importance(rf_fit)[order(importance(rf_fit), decreasing = T),])
+```
+
+The finetuned Random forest model has a RMSE of `r RMSE_final`. The most important indicators for prediction are GDP per capita, agricultural jobs, cereal yield, and population growth.
+
+# Conclusion
+The goal of this report was to build a model that predicts the prevalence of undernourishment for Sub-Saharan Africa and Asia based on a selection of key economic, societal, and agricultural indicators. After pulling and wrangling the data, the dataset was split into a 90% training and 10% evaluation set. The various elements of the dataset were then described - distribution, correlation, and structure. After presenting the modelling approach focust on the root-mean-square error evaluation, a generalized linear model and a Random forest was built. The best performing model - the Random forest model - was further finetuned through 5-fold cross-validation with no repeats.
+
+ ***The best performing model is a Random forest model*** which, after finetuning, delivers a ***RMSE of `r RMSE_final`***.  Another model calculated was a Generalized linear model with a RMSE of `r RMSE_glm`. Considering the performance of the generalized linear model, the final finetuned Random forest model is clearly superior. The machine learning model Random forest vastly outperform the regression model, with the final Random forest model being `r RMSE_glm/RMSE_final` times better performing than the regression model.
+ 
+```{r table-performance-models-final, eval = T, echo = F, message = F}
+data.frame(
+  Model = c("Generalised linear model",
+            "Random forest",
+            "Tuned Random forest"),
+  RMSE = c(RMSE_glm,
+                  RMSE_rf,
+           RMSE_final)) %>%
+    kbl("latex",
+        booktabs = T,
+        caption = "Performance of all the models") %>%
+      kable_classic(full_width = F) %>%
+      row_spec(0, bold=T) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+There are several clear shortcomings to this model. First, data availability: the data showed big gaps that were filed up by calculating the mean of the area. Second, predictive power: a RMSE of `r RMSE_final` is still too high to make meaningful predictions - and to base policy response to those numbers - in reality. Third, useability: given the vastness and difference between and within sub-Saharan Africa and Asia, a model that predicts the undernourishment for the whole two regions rather than on the country level is severely restricted in its usefulness. Undernourishment should be rather taken at country, or better, at the most local level possible to steer interventions. Perhaps the best value of this model is not necessarily its predictive power, but the selection of variables that are influential for prediction: the GDP per capita, agricultural jobs, and cereal yields. Policymakers should be sensitive to changes in these indicators for their importance to undernourishment, and this can already influence interventions for undernourishment, regardless of the specific RMSE performance of the model. For example, more sensitivity to the importance of agricultural jobs and cereal yield.
+
+Future work - Predicting machine learning to a level that is useful to steer interventions requires more advanced models and data gathering. With the persistent and increasing challenge of undernourishment, data availability and prediction should be vastly improved. The World Bank Open Data repository is vast, but even for the more basic indicators - as selected for this report - large data gaps exist. Investments in national statistical agencies is perhaps as important, if not more, than the development of advanced machine learning in the field of development economics. Without good data, even mundaine statistical analysis becomes challenging.
